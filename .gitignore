@@ -16,3 +16,4 @@ android/app/build/
 ios/build/
 
 .vscode/
+/server/src/uploads
