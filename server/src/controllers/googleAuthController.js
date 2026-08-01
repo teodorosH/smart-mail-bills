@@ -48,8 +48,8 @@ const googleAuthCallback = async (req, res) => {
 
 try {
   console.log("=== התחלת שמירת טוקן מגוגל ===");
-  console.log("Tokens received:", tokens);
-  console.log("Target User ID:", targetUserId);
+  // console.log("Tokens received:", tokens);
+  // console.log("Target User ID:", targetUserId);
 
   await pool.query(
     `INSERT INTO oauth_tokens (user_id, provider, access_token, refresh_token, expires_at) 

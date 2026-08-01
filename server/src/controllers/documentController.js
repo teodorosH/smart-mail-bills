@@ -1,46 +1,72 @@
 
 const pool = require('../config/db'); // או הנתיב לקובץ החיבור שלך ל-PostgreSQL
+const { extractTextFromPdf } = require('../services/pdfService'); // או הנתיב לקובץ החיבור שלך ל-PostgreSQL
 
 const { google } = require('googleapis');
 
 const path = require('path');
 const fs = require('fs');
+const { parseDocument } = require('../services/documentParser');
+
+
 const getDocuments = async (req, res) => {
-  console.log('GET DOCUMENTS START');
-
   try {
-    const userId = req.user?.id || req.user?.userId;
 
-    console.log('User ID:', userId);
+    const userId =
+      req.user.userId;
 
-    const query = `
-      SELECT *
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        id,
+        title,
+        company_name,
+        amount,
+        currency,
+        document_type,
+        payment_status,
+        payment_required,
+        invoice_date,
+        due_date,
+        summary,
+        created_at
       FROM documents
       WHERE user_id = $1
       ORDER BY created_at DESC
-    `;
+      `,
+      [userId]
+    );
 
-    console.log('Before DB query');
-
-    const { rows } = await pool.query(query, [userId]);
-
-    console.log('After DB query:', rows.length);
-
-    return res.status(200).json({
+    console.log(res.data);
+    res.json({
       success: true,
       documents: rows
     });
 
-  } catch (error) {
-    console.error('GET DOCUMENTS ERROR:', error);
 
-    return res.status(500).json({
-      error: error.message
+  } catch (error) {
+
+    console.error(error);
+
+    res.status(500).json({
+      error: 'Failed loading documents'
     });
+
   }
 };
 
+
+function safeDate(value) {
+  if (!value) return null;
+
+      const date = new Date(value);
+
+      return isNaN(date.getTime()) ? null : date;
+}
+
 const triggerEmailScan = async (req, res) => {
+
   console.log('Email Scan START');
   try {
     const userId = req.user?.id || req.user?.userId;
@@ -80,8 +106,8 @@ const triggerEmailScan = async (req, res) => {
     // חיפוש מייל אחד בלבד לבדיקה
     const emailsResponse = await gmail.users.messages.list({
       userId: 'me',
-      maxResults: 1,
-      q: 'has:attachment'
+      q: 'has:attachment (invoice OR receipt OR חשבונית) filename:pdf',
+      maxResults: 10
     });
 
     const messages = emailsResponse.data.messages || [];
@@ -94,108 +120,255 @@ const triggerEmailScan = async (req, res) => {
       });
     }
 
-    // כרגע מעבדים רק מייל אחד
-    const messageId = messages[0].id;
+    let newDocumentsCount = 0;
+    console.log('Found emails:', messages.length);
+    for (const message of messages) {
 
-    const email = await gmail.users.messages.get({
-      userId: 'me',
-      id: messageId
-    });
-
-    const headers = email.data.payload.headers;
-
-    const subject =
-      headers.find(h => h.name === 'Subject')?.value || 'No subject';
-
-    const from =
-      headers.find(h => h.name === 'From')?.value || 'Unknown sender';
-
-    const receivedDate =
-      headers.find(h => h.name === 'Date')?.value || new Date();
-
-    console.log('Found email:', messageId);
-
-    const attachment = email.data.payload.parts?.find(
-      part => part.filename && part.body.attachmentId
-    );
-
-    const filename = attachment.filename;
-
-    const attachmentResponse = await gmail.users.messages.attachments.get({
-      userId: 'me',
-      messageId: messageId,
-      id: attachment.body.attachmentId
-    });
-
-    const fileBuffer = Buffer.from(
-      attachmentResponse.data.data,
-      'base64'
-    );
-    const uploadDir = path.join(__dirname, '../uploads');
-    console.log('Upload directory:', uploadDir);
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir);
-    }
-    const savedFileName = `${Date.now()}-${filename}`;
-
-    const savedFilePath = path.join(
-      uploadDir,
-      savedFileName
-    );
+      const messageId = message.id;
 
 
-    fs.writeFileSync(
-      savedFilePath,
-      fileBuffer
-    );
+      // בדיקה האם כבר סרקנו את המייל הזה
+      const existing = await pool.query(
+        `
+        SELECT id
+        FROM documents
+        WHERE gmail_message_id = $1
+        `,
+        [messageId]
+      );
 
-    if (attachment) {
-      console.log('Attachment found:', attachment.filename);
-    }
 
-    const documentType =
-      filename.toLowerCase().includes('invoice') ||
-        filename.toLowerCase().includes('receipt')
-        ? 'invoice'
-        : 'other';
+      if (existing.rows.length > 0) {
 
-    await pool.query(
-      `
-    INSERT INTO documents
-    (
-    user_id,
-    title,
-    source,
-    created_at,
-    category,
-    document_type,
-    payment_status,
-    file_path,
-    mime_type
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-    `,
-      [
-        userId,
-        savedFileName,
-        from,
-        new Date(receivedDate),
-        'gmail_scan',
-        documentType,
-        'unknown',
+        console.log(
+          'Skipping existing email:',
+          messageId
+        );
+
+        continue;
+      }
+
+
+      const email = await gmail.users.messages.get({
+        userId: 'me',
+        id: messageId
+      });
+
+      const headers = email.data.payload.headers;
+
+      const subject =
+        headers.find(h => h.name === 'Subject')?.value || 'No subject';
+
+      const from =
+        headers.find(h => h.name === 'From')?.value || 'Unknown sender';
+
+      const receivedDate =
+        headers.find(h => h.name === 'Date')?.value || new Date();
+
+      console.log('Found email:', messageId);
+
+      const attachment = email.data.payload.parts?.find(
+        part => part.filename && part.body.attachmentId
+      );
+
+      if (!attachment.mimeType?.includes('pdf')) {
+        console.log('Skipping non PDF:', attachment.filename);
+        continue;
+}
+
+      const filename = attachment.filename;
+      const { generateFileHash } = require('../utils/fileHash');
+
+      const attachmentResponse = await gmail.users.messages.attachments.get({
+        userId: 'me',
+        messageId: messageId,
+        id: attachment.body.attachmentId
+      });
+
+      const data = attachmentResponse.data.data
+        .replace(/-/g, '+')
+        .replace(/_/g, '/');
+
+      const fileBuffer = Buffer.from(data, 'base64');
+
+      const documentHash = generateFileHash(fileBuffer);
+
+      const exists =
+        await pool.query(
+          `
+  SELECT id
+  FROM documents
+  WHERE 
+  gmail_message_id=$1
+  AND attachment_id=$2
+
+  OR document_hash=$3
+  `,
+          [
+            gmail.messageId,
+            attachment.id,
+            documentHash
+          ]
+        );
+
+
+      if (exists.rows.length > 0) {
+
+        console.log(
+          "Document already exists:",
+          "message: המסמך כבר קיים במערכת",
+          documentHash
+        );
+        continue;
+
+      }
+
+      const uploadDir = path.join(__dirname, '../uploads');
+      console.log('Upload directory:', uploadDir);
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir);
+      }
+      const savedFileName = `${Date.now()}-${filename}`;
+
+      const savedFilePath = path.join(
+        uploadDir,
+        savedFileName
+      );
+
+
+      fs.writeFileSync(
         savedFilePath,
-        attachment.mimeType || 'application/pdf'
-      ]
-    );
+        fileBuffer
+      );
 
 
-    const newInvoicesCount = 1;
+      let text = '';
+
+      try {
+          text = await extractTextFromPdf(savedFilePath);
+      } catch (err) {
+          console.error(
+              'Cannot parse PDF:',
+              filename,
+              err.message
+          );
+
+          continue;
+      }
+
+      console.log("*************>>  " + text);
+
+      const parsed = parseDocument(text);
+
+      console.log('Parsed document:', parsed);
+
+      // const { sanitizeText } = require('../services/sanitizeService');
+
+      // const cleanText = sanitizeText(text);
+
+      // const result = await analyzeDocument(cleanText);
+
+      //     {
+      //  "amount": "48.50",
+      //  "currency": "USD",
+      //  "date": "2026-06-01",
+      //  "document_text": "Monthly cloud hosting invoice"
+      // }
+
+      if (attachment) {
+        console.log('Attachment found:', attachment.filename);
+      }
+
+      const documentType =
+        filename.toLowerCase().includes('invoice') ||
+          filename.toLowerCase().includes('receipt')
+          ? 'invoice'
+          : 'other';
+
+
+      await pool.query(
+        `
+INSERT INTO documents
+(
+ user_id,
+ title,
+ source,
+ created_at,
+ category,
+ document_type,
+ payment_status,
+ payment_required,
+ company_name,
+ amount,
+ currency,
+ invoice_date,
+ due_date,
+ gmail_message_id,
+ attachment_id,
+ document_hash,
+ file_path
+)
+
+VALUES
+(
+ $1,$2,$3,$4,$5,$6,$7,$8,
+ $9,$10,$11,$12,$13,
+ $14,$15,$16,$17
+)
+
+`,
+        [
+          userId,
+          filename,
+          from,
+          new Date(receivedDate),
+          'gmail_scan',
+
+          parsed.documentType,
+
+          parsed.paymentRequired
+            ? 'pending'
+            : 'paid',
+
+          parsed.paymentRequired,
+
+          parsed.company,
+
+          parsed.amount,
+
+          parsed.currency,
+
+          safeDate(parsed.invoiceDate),
+
+          safeDate(parsed.dueDate),
+
+          messageId,
+
+          attachment.body.attachmentId,
+
+          documentHash,
+
+          savedFilePath
+        ]
+      );
+
+      console.log(
+        'Saved document:',
+        {
+          filename,
+          company: parsed.company,
+          amount: parsed.amount,
+          type: parsed.documentType
+        }
+      );
+      newDocumentsCount++;
+    }
 
     return res.status(200).json({
       success: true,
       message: 'סריקת בדיקה הסתיימה',
       data: {
-        count: newInvoicesCount
+        count: newDocumentsCount
       }
     });
 
@@ -235,13 +408,13 @@ const downloadDocument = async (req, res) => {
 
     const doc = result.rows[0];
     console.log('Document from DB:', doc);
-  if (!doc.file_path || !fs.existsSync(doc.file_path)) {
-    return res.status(404).json({
-      error: 'File not found on server'
-    });
-  }
+    if (!doc.file_path || !fs.existsSync(doc.file_path)) {
+      return res.status(404).json({
+        error: 'File not found on server'
+      });
+    }
 
-  res.download(doc.file_path, doc.title);
+    res.download(doc.file_path, doc.title);
 
   } catch (error) {
 
