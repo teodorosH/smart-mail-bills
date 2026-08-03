@@ -37,6 +37,27 @@ router.get('/google/url', (req, res) => {
   res.json({ url: googleAuthUrl });
 });
 
+// בדיקת סטטוס החיבור לגוגל עבור המשתמש המחובר
+router.get('/google/status', verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    const tokenResult = await pool.query(
+      `SELECT expires_at FROM oauth_tokens 
+       WHERE user_id = $1 AND provider = $2 AND expires_at > NOW()`,
+      [userId, 'google']
+    );
+
+    if (tokenResult.rows.length > 0) {
+      return res.json({ connected: true });
+    }
+
+    res.json({ connected: false });
+  } catch (error) {
+    console.error('Check Google status error:', error);
+    res.status(500).json({ connected: false });
+  }
+});
 
 // 2. Callback מגוגל
 router.get('/google/callback', async (req, res) => {

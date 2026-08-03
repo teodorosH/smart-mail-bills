@@ -1,22 +1,24 @@
 const jwt = require('jsonwebtoken');
 
 const verifyToken = (req, res, next) => {
-  const authHeader = req.headers.authorization;
+  // קריאת ה-Header
+  const authHeader = req.headers['authorization'] || req.headers['Authorization'];
+  console.log('Authorization Header:', authHeader);
 
-  console.log("Authorization Header:", authHeader);
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'גישה דחויה: לא סופק Token תקין' });
+  }
 
-  const token = authHeader && authHeader.split(" ")[1];
+  const token = authHeader.split(' ')[1];
 
-  // console.log("Token:", token);
-  if (!token) return res.status(401).json({ error: 'Access token missing' });
-
-  // console.log("Verifying token: %s vs %s", token, process.env.JWT_SECRET); // Debugging line to print the token
-  jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret', (err, user) => {
-    if (err) return res.status(403).json({ error: 'Invalid token' });
-    req.user = user;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
     next();
-  });
+  } catch (error) {
+    console.error('Token Verification Error:', error.message);
+    return res.status(401).json({ error: 'Token פג תוקף או אינו תקין' });
+  }
 };
 
-// שים לב: מייצאים את הפונקציה עצמה ישירות!
 module.exports = verifyToken;

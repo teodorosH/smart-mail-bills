@@ -2,10 +2,10 @@ import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const API = axios.create({
-  baseURL: 'http://localhost:5000/api', // במידה ואתה בודק במכשיר פיזי, שנה לכתובת ה-IP של המחשב שלך ברשת
+  baseURL: 'http://localhost:5000/api', // ודא שזו הכתובת/פורט הכללי של השרת שלך
 });
 
-// הוספת טוקן אוטומטית לכל בקשה אם קיים
+// interceptor שמצמיד את ה-Token לכל בקשה יוצאת
 API.interceptors.request.use(
   async (config) => {
     const token = await AsyncStorage.getItem('token');

@@ -76,7 +76,7 @@ function parseDocument(cleanText) {
     };
   }
 
-  // 1. Amount Extraction - חילוץ חסין שמבטיח מספר שטוח במידה וקיים
+  // 1. Amount Extraction - חילוץ שטוח וחסין
   const amountRes = parseAmount(cleanText);
   let safeAmount = null;
 
