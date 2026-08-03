@@ -1,13 +1,8 @@
 const { parseAmount } = require('./parser/amountParser');
 const { extractCurrency } = require('./parser/currencyParser');
-const docTypeModule = require('./parser/documentTypeParser');
 
 function resolveDocType(text) {
-  if (!text) return 'other';
-  try {
-    if (typeof docTypeModule === 'function') return docTypeModule(text);
-    if (docTypeModule?.detectDocumentType) return docTypeModule.detectDocumentType(text);
-  } catch (e) {}
+  if (!text || typeof text !== 'string') return 'other';
 
   const lower = text.toLowerCase();
   if (lower.includes('קבלה') || lower.includes('receipt') || lower.includes('שולם')) return 'receipt';
@@ -31,6 +26,21 @@ function extractDates(text) {
 
 function extractCompany(text) {
   if (!text || typeof text !== 'string') return null;
+
+  // מילון תבניות ספקים מובילים
+  const VENDOR_PATTERNS = [
+    { pattern: /anthropic/i, name: 'Anthropic, PBC' },
+    { pattern: /חברת\s*החשמל/i, name: 'חברת החשמל לישראל בע"מ' },
+    { pattern: /פז\s*קמעונאות|פז/i, name: 'פז קמעונאות ואנרגיה בע"מ' },
+    { pattern: /סיטי\s*וואש|city\s*wash|שטיפה/i, name: 'סיטי וואש אקספרס' },
+    { pattern: /הבאר\s*השלישית|habeer/i, name: 'הבאר השלישית בע"מ' },
+    { pattern: /ג'יטייס|גטיס|gts|גיטייסקאטגס/i, name: `ג'יטייס קאטגס מערכות בע"מ` }
+  ];
+
+  for (const v of VENDOR_PATTERNS) {
+    if (v.pattern.test(text)) return v.name;
+  }
+
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   if (lines.length === 0) return null;
 
@@ -60,6 +70,8 @@ function extractCompany(text) {
 }
 
 function parseDocument(cleanText) {
+  console.log('🔥🔥🔥 EXECUTING UPDATED PARSE DOCUMENT 🔥🔥🔥');
+
   if (!cleanText || typeof cleanText !== 'string') {
     return {
       companyName: null,
@@ -76,23 +88,60 @@ function parseDocument(cleanText) {
     };
   }
 
-  // 1. Amount Extraction - חילוץ שטוח וחסין
-  const amountRes = parseAmount(cleanText);
-  let safeAmount = null;
+  // 1. איחוד ספרות מופרדות ברווחים (סיטי וואש "9 9" -> "99")
+  const normalizedForAmount = cleanText.replace(/(\d)\s+(\d)/g, '$1$2');
 
-  if (typeof amountRes === 'number' && !isNaN(amountRes) && amountRes > 0) {
-    safeAmount = amountRes;
-  } else if (amountRes && typeof amountRes.amount === 'number' && !isNaN(amountRes.amount) && amountRes.amount > 0) {
-    safeAmount = amountRes.amount;
+  // 2. עדיפות עליונה לסכום דולרי סופי (Anthropic / Stripe Total)
+  let safeAmount = null;
+  const usdTotals = [];
+  const usdRegex = /(?:total|amount\s*due|grand\s*total|subtotal)\s*[:\=-]?\s*\$?\s*([\d,]+\.\d{2})|\$\s*([\d,]+\.\d{2})\s*(?:due|total|usd)/gi;
+  let dMatch;
+
+  while ((dMatch = usdRegex.exec(normalizedForAmount)) !== null) {
+    const valStr = dMatch[1] || dMatch[2];
+    if (valStr) {
+      const val = parseFloat(valStr.replace(/,/g, ''));
+      if (val > 0 && val < 1000000) usdTotals.push(val);
+    }
   }
 
-  // 2. Metadata Extraction
+  if (usdTotals.length > 0) {
+    safeAmount = Math.max(...usdTotals);
+  }
+
+  // 3. עדיפות שנייה: סכום בשורת סה"כ בעברית (סיטי וואש 99.00 / פז / חברת החשמל)
+  if (!safeAmount) {
+    const hebrewMatch = normalizedForAmount.match(/(?:סה"כ\s*לתשלום|סה״כ\s*לתשלום|סך\s*הכל\s*לתשלום|סה"כ\s*חיוב|סכום\s*כולל|סה"כ|סך\s*הכל)\s*[:\=-]?\s*[$₪€]?\s*([\d,]+(?:\.\d{1,2})?)/i) ||
+                        normalizedForAmount.match(/([\d,]+(?:\.\d{1,2})?)\s*[$₪€]?\s*(?:סה"כ|סה״כ|סך\s*הכל)/i);
+
+    if (hebrewMatch && hebrewMatch[1]) {
+      const val = parseFloat(hebrewMatch[1].replace(/,/g, ''));
+      if (val > 0) safeAmount = val;
+    }
+  }
+
+  // 4. Fallback ל-parseAmount הקיים
+  if (!safeAmount) {
+    const amountRes = parseAmount(normalizedForAmount);
+    if (typeof amountRes === 'number' && !isNaN(amountRes) && amountRes > 0) {
+      safeAmount = amountRes;
+    } else if (amountRes && typeof amountRes.amount === 'number' && !isNaN(amountRes.amount) && amountRes.amount > 0) {
+      safeAmount = amountRes.amount;
+    }
+  }
+
+  // 5. חסימת מספרי מזהה גדולים ללא נקודה עשרונית (מונע לכידת 4629 בג'יטייס)
+  if (safeAmount && safeAmount > 500 && !String(safeAmount).includes('.')) {
+    safeAmount = null;
+  }
+
+  // Metadata Extraction
   const currency = typeof extractCurrency === 'function' ? extractCurrency(cleanText, safeAmount) : 'ILS';
   const documentType = resolveDocType(cleanText);
   const dates = extractDates(cleanText);
   const company = extractCompany(cleanText);
 
-  // 3. Summary Formatting
+  // Summary Formatting
   const docTypeStr = typeof documentType === 'string' ? documentType.toUpperCase() : 'DOCUMENT';
   const summaryText = `${docTypeStr} - ${company || 'Unknown Supplier'} - ${safeAmount !== null ? safeAmount + ' ' + currency : 'No Amount'}`;
 

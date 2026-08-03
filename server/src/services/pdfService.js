@@ -1,40 +1,32 @@
 const fs = require('fs');
 const PDFParser = require('pdf2json');
 
-/**
- * 🟢 תיקון עברית הפוכה (RTL) ואיחוד אותיות מופרדות
- */
-function fixHebrewRTL(text) {
+function fixTextLayout(text) {
   if (!text) return '';
 
   return text.split('\n').map(line => {
-    // בדיקה אם השורה מכילה אותיות עבריות
-    const hasHebrew = /[\u0590-\u05FF]/.test(line);
+    let cleaned = line.replace(/[\x00-\x1F\x7F-\x9F«»"'\~]/g, '').trim();
+
+    // איחוד אותיות אנגליות מרווחות בלבד
+    cleaned = cleaned.replace(/(?<=\b[a-zA-Z])\s+(?=[a-zA-Z]\b)/g, '');
+
+    const hasHebrew = /[\u0590-\u05FF]/.test(cleaned);
 
     if (hasHebrew) {
-      // אם האותיות מופרדות ברווחים (למשל: "מ ס מ ך"), נצמצם רווחים בודדים
-      let cleaned = line.replace(/(?<=[[\u0590-\u05FF])\s+(?=[\u0590-\u05FF])/g, '');
-
-      // הפיכת סדר המילים והאותיות במידה והן הפוכות
-      // אם המילה "מסמך" מופיעה כ-"ךמסמ", נבצע היפוך מחרוזת
-      const words = cleaned.split(' ');
-      const reversedWords = words.map(word => {
+      const words = cleaned.split(/\s+/);
+      const fixedWords = words.map(word => {
         if (/[\u0590-\u05FF]/.test(word)) {
           return word.split('').reverse().join('');
         }
         return word;
       });
-
-      return reversedWords.reverse().join(' ');
+      return fixedWords.reverse().join(' ');
     }
 
-    return line;
+    return cleaned.replace(/\s+/g, ' ').trim();
   }).join('\n');
 }
 
-/**
- * חילוץ טקסט מ-PDF בצורה מוגנת ומותאמת לאלגוריתם Parsing
- */
 function extractPagesFromPdf(filePath) {
   return new Promise((resolve, reject) => {
     const pdfParser = new PDFParser(null, 1);
@@ -71,8 +63,7 @@ function extractPagesFromPdf(filePath) {
               lastY = textItem.y;
             });
 
-            // 🟢 הפעלת התיקון לעברית
-            const fixedText = fixHebrewRTL(pageText);
+            const fixedText = fixTextLayout(pageText);
             pages.push(fixedText.trim());
           });
         }

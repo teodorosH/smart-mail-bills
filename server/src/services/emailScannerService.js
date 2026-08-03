@@ -40,7 +40,7 @@ const scanUserEmails = async (userId) => {
     const response = await gmail.users.messages.list({
       userId: 'me',
       q: query,
-      maxResults: 10,
+      maxResults: 20,
     });
 
     const messages = response.data.messages || [];
